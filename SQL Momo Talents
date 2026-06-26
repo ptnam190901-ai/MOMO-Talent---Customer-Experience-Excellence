@@ -1,0 +1,178 @@
+# Update table due to inconsistent values
+UPDATE roject-f2af1719-b7e6-4739-bce.Momo.ticket
+SET ticket_id = 260227.0000022
+WHERE ticket_id = VB.260227.0000022
+
+UPDATE roject-f2af1719-b7e6-4739-bce.Momo.sla
+SET ticket_id = 260227.0000022
+WHERE ticket_id = VB.260227.0000022
+
+# 1. Number of tickets per week
+WITH week_table AS # Create a table storing week_num
+       (SELECT EXTRACT (ISOWEEK FROM created_date) AS week_num,
+       FROM project-f2af1719-b7e6-4739-bce.Momo.ticket)
+SELECT AVG(count_per_week) # Calculate average tickets per week
+FROM ( # Make a table that counts tickets per week
+       SELECT week_num, COUNT(week_num) AS count_per_week
+       FROM week_table
+       GROUP BY week_num
+       HAVING week_num IS NOT NULL
+       ORDER BY week_num)
+
+# 2.1 SLA-on-time rate by week
+WITH ticket_sla AS ( # Join two tables data_ticket and data_sla
+  SELECT
+      t.Ticket_id,
+      t.Level,
+      t.Created_date,
+      s.Chuyen_time,
+      s.Phanhoi_time,
+      s.SLA_Camket
+  FROM project-f2af1719-b7e6-4739-bce.Momo.ticket t
+  JOIN project-f2af1719-b7e6-4739-bce.Momo.sla s
+      ON t.Ticket_id = s.Ticket_id_
+),
+
+calendar_days AS ( # Calculate days between chuyen_time and phanhoi_time
+  SELECT
+      ticket_id,
+      level,
+      created_date,
+      sla_camket,
+      chuyen_time,
+      phanhoi_time,
+      day
+  FROM ticket_sla,
+  UNNEST(
+      GENERATE_DATE_ARRAY(
+          DATE(chuyen_time),
+          DATE(phanhoi_time)
+      )
+  ) AS day
+),
+
+working_minutes AS ( # Calculate only official working minutes
+  SELECT
+      ticket_id,
+      level,
+      created_date,
+      sla_camket,
+
+      SUM(
+        CASE
+          WHEN EXTRACT(DAYOFWEEK FROM day) IN (1,7)
+            THEN 0
+
+          ELSE GREATEST(
+                0,
+                TIMESTAMP_DIFF(
+                    LEAST(
+                        TIMESTAMP(DATETIME(day, TIME '18:00:00')),
+                        phanhoi_time
+                    ),
+                    GREATEST(
+                        TIMESTAMP(DATETIME(day, TIME '09:00:00')),
+                        chuyen_time
+                    ),
+                    MINUTE
+                )
+          )
+        END
+      ) AS actual_sla_minutes
+
+  FROM calendar_days
+  GROUP BY
+      ticket_id,
+      level,
+      created_date,
+      sla_camket
+)
+
+SELECT   # Bread down the SLA-on-time rate by week
+    EXTRACT(ISOWEEK FROM created_date) AS week_num,
+    avg(actual_sla_minutes/sla_camket) AS sla_on_time_rate
+
+FROM working_minutes
+GROUP BY
+    week_num
+ORDER BY
+    week_num
+
+# 2.2 SLA-on-time rate by service
+WITH ticket_sla AS (
+  SELECT
+      t.Ticket_id,
+      t.Level,
+      t.Created_date,
+      s.Chuyen_time,
+      s.Phanhoi_time,
+      s.SLA_Camket
+  FROM project-f2af1719-b7e6-4739-bce.Momo.ticket t
+  JOIN project-f2af1719-b7e6-4739-bce.Momo.sla s
+      ON t.Ticket_id = s.Ticket_id_
+),
+
+calendar_days AS (
+  SELECT
+      ticket_id,
+      level,
+      created_date,
+      sla_camket,
+      chuyen_time,
+      phanhoi_time,
+      day
+  FROM ticket_sla,
+  UNNEST(
+      GENERATE_DATE_ARRAY(
+          DATE(chuyen_time),
+          DATE(phanhoi_time)
+      )
+  ) AS day
+),
+
+working_minutes AS (
+  SELECT
+      ticket_id,
+      level,
+      created_date,
+      sla_camket,
+
+      SUM(
+        CASE
+          WHEN EXTRACT(DAYOFWEEK FROM day) IN (1,7)
+            THEN 0
+
+          ELSE GREATEST(
+                0,
+                TIMESTAMP_DIFF(
+                    LEAST(
+                        TIMESTAMP(DATETIME(day, TIME '18:00:00')),
+                        phanhoi_time
+                    ),
+                    GREATEST(
+                        TIMESTAMP(DATETIME(day, TIME '09:00:00')),
+                        chuyen_time
+                    ),
+                    MINUTE
+                )
+          )
+        END
+      ) AS actual_sla_minutes
+
+  FROM calendar_days
+  GROUP BY
+      ticket_id,
+      level,
+      created_date,
+      sla_camket
+)
+
+SELECT   # Bread down the SLA-on-time rate by week
+    level AS service,
+    avg(actual_sla_minutes/sla_camket) AS sla_on_time_rate
+
+FROM working_minutes
+GROUP BY
+    service
+ORDER BY
+    sla_on_time_rate DESC
